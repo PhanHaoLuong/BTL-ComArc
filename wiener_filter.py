@@ -8,8 +8,6 @@ M = 3
 dSz = len(desired)
 iSz = dSz
 
-
-
 if dSz != iSz:
     print("Invalid input")
 else:
