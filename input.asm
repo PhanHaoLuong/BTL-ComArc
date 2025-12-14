@@ -2,82 +2,82 @@
 file:       .asciiz "Hello.txt"
 content:    .space 1024
 .align 2
-floatArr:   .space 40          # space for 10 floats (10 * 4 bytes)
+floatArr:   .space 40           # 10 floats (4 bytes each)
 space:      .asciiz " "
 newline:    .asciiz "\n"
-errorMsg:   .asciiz "Error: negative numbers are not allowed.\n"
-
-# constants for rounding
-.align 2
-ten_f:      .float 10.0
-half_f:     .float 0.5
-zero_f:     .float 0.0
+# errorMsg removed as negative numbers are now allowed
 
 .text
-.globl main
 main:
-    #### 1) OPEN FILE ###
+    #### 1. OPEN FILE ####
     li $v0, 13
     la $a0, file
-    li $a1, 0
+    li $a1, 0           # read only
     li $a2, 0
     syscall
-    move $t0, $v0           # file descriptor
+    move $t0, $v0       # save file descriptor
 
-    #### 2) READ FILE ###
+    #### 2. READ FILE ####
     li $v0, 14
     move $a0, $t0
     la $a1, content
     li $a2, 1024
     syscall
 
-    #### 3) CLOSE FILE ###
+    #### 3. CLOSE FILE ####
     li $v0, 16
     move $a0, $t0
     syscall
 
-    #### 4) PREP: pointers & zero constants ###
-    la $t1, content         # pointer to input text
-    la $t2, floatArr        # pointer where we store floats
+    #### 4. PARSE INTO FLOATS ####
+    la $t1, content     # content pointer
+    la $t2, floatArr    # array pointer
 
-    # load rounding constants into FPU registers
-    la $t9, ten_f
-    l.s $f10, 0($t9)        # $f10 = 10.0
+    # Registers:
+    # $t3 = integer part
+    # $t4 = fractional part
+    # $t5 = divisor (powers of 10)
+    # $t6 = flag: 0=int processing, 1=fraction processing
+    # $s4 = flag: has_digits (0=no digits seen yet, 1=digits seen)
+    # $s5 = flag: is_negative (0=positive, 1=negative)
 
-    la $t9, half_f
-    l.s $f11, 0($t9)        # $f11 = 0.5
-
-    la $t9, zero_f
-    l.s $f14, 0($t9)        # $f14 = 0.0 (for negative check if needed)
-
-    # temporary integer accumulators (string parsing)
-    li $t3, 0               # integer part accumulator
-    li $t4, 0               # fractional part accumulator
-    li $t5, 0               # fractional divisor as integer (10,100,...)
-    li $t6, 0               # fractional flag (0=int part, 1=fraction part)
+    li $t3, 0
+    li $t4, 0
+    li $t5, 0
+    li $t6, 0
+    li $s4, 0           # Initialize has_digits
+    li $s5, 0           # Initialize is_negative
 
 parse_loop:
     lb $t7, 0($t1)
-    beqz $t7, parse_end     # end of string
+    beqz $t7, parse_end        # null terminator -> end
 
-    # negative sign check -> immediate error
-    li $t8, 45              # ASCII '-'
-    beq $t7, $t8, error_exit
+    # --- detect negative sign ---
+    li $t8, 45                 # ASCII '-'
+    beq $t7, $t8, is_minus     # CHANGE: Jump to sign handler
 
-    # space/newline -> end of a number
-    beq $t7, 32, store_num
-    beq $t7, 10, store_num
+    # --- space or newline means end of number ---
+    beq $t7, 32, store_num     # Space
+    beq $t7, 10, store_num     # Newline
+    beq $t7, 13, store_num     # Carriage return
 
-    # decimal point
+    # --- decimal point '.' ---
     beq $t7, 46, is_dot
 
-    # digit? convert ascii to 0..9
+    # --- digit check ---
     addi $t7, $t7, -48
     blt $t7, 0, next_char
     bgt $t7, 9, next_char
 
+    # If we get here, it is a valid digit
+    li $s4, 1                  # Set has_digits = 1
+
     beqz $t6, int_part
     j frac_part
+
+is_minus:
+    li $s5, 1                  # CHANGE: Set negative flag
+    j next_char
 
 int_part:
     mul $t3, $t3, 10
@@ -88,12 +88,11 @@ frac_part:
     mul $t4, $t4, 10
     add $t4, $t4, $t7
     mul $t5, $t5, 10
-    addi $t5, $t5, 0
     j next_char
 
 is_dot:
     li $t6, 1
-    li $t5, 1              # initialize divisor accumulator for fraction digits
+    li $t5, 1
     j next_char
 
 next_char:
@@ -101,70 +100,56 @@ next_char:
     j parse_loop
 
 store_num:
-    beqz $t3, skip_store   # nothing to store (multiple spaces), skip
+    beqz $s4, skip_store       # Only store if we actually saw digits
 
-    # Convert integer part to float in $f0
-    mtc1 $t3, $f0          # move integer bits into $f0
-    cvt.s.w $f0, $f0       # $f0 = float(integer part)
+    mtc1 $t3, $f0
+    cvt.s.w $f0, $f0
 
-    # if fractional part exists, compute fraction float = t4 / t5 and add
-    beqz $t6, rounding_step
-    mtc1 $t1, $f1          # reuse $f1 temporarily (move something to satisfy instruction pattern)
-    mtc1 $t4, $f1          # $f1 contains integer fractional digits
-    cvt.s.w $f1, $f1       # fractional digits as float
-    mtc1 $t9, $f2          # temporary: load divisor integer into f2 via mtc1
-    mtc1 $t9, $f2          # (we'll instead load divisor using integer -> f2 correctly below)
+    beqz $t6, check_sign       # No fraction? Go straight to sign check
 
-    # load divisor t5 into $f2 properly:
-    # t5 is an integer in integer reg; move then convert
+    # Calculate fraction
+    mtc1 $t4, $f1
+    cvt.s.w $f1, $f1
     mtc1 $t5, $f2
     cvt.s.w $f2, $f2
+    div.s $f1, $f1, $f2
+    add.s $f0, $f0, $f1        # f0 = integer + fraction
 
-    div.s $f1, $f1, $f2    # f1 = fractional_part / divisor
-    add.s $f0, $f0, $f1    # f0 = integer + fractional
+check_sign:
+    # CHANGE: Apply negative sign if flag is set
+    beqz $s5, store_final
+    neg.s $f0, $f0
 
-rounding_step:
-    # ROUND TO 1 DECIMAL: rounded = floor(x*10 + 0.5) / 10
-    mul.s $f1, $f0, $f10   # f1 = x * 10
-    add.s $f1, $f1, $f11   # f1 = x*10 + 0.5
-    cvt.w.s $f2, $f1       # convert to integer in FPU (round toward zero/truncate)
-    cvt.s.w $f2, $f2       # convert back to float
-    div.s $f0, $f2, $f10   # f0 = (int) / 10 => rounded value in f0
-
-    # store f0 into array (ensure alignment)
-    andi $t9, $t2, 3
-    bnez $t9, align_fix_store
+store_final:
     s.s $f0, 0($t2)
-    addi $t2, $t2, 4
-    j reset_acc
-
-align_fix_store:
-    # safety: move t2 to next aligned boundary and store
-    addi $t2, $t2, 4
-    s.s $f0, -4($t2)
+    addi $t2, $t2, 4           # Increment array pointer
     j reset_acc
 
 reset_acc:
-    # reset parsing accumulators
     li $t3, 0
     li $t4, 0
     li $t5, 0
     li $t6, 0
+    li $s4, 0
+    li $s5, 0                  # CHANGE: Reset negative flag
     addi $t1, $t1, 1
     j parse_loop
 
 skip_store:
+    # Even if we skip storing, we must reset flags (like is_negative)
+    # in case we had a lone '-' or garbage
+    li $s5, 0                  
     addi $t1, $t1, 1
     j parse_loop
 
 parse_end:
-    # handle last number if file does not end with space/newline
-    beqz $t3, done_parse
+    beqz $s4, done_parse       # If no digits pending, we are done
 
-    # same conversion as store_num but simpler (no extra pointer moves)
     mtc1 $t3, $f0
     cvt.s.w $f0, $f0
-    beqz $t6, skip_frac_add
+
+    beqz $t6, check_sign_last
+
     mtc1 $t4, $f1
     cvt.s.w $f1, $f1
     mtc1 $t5, $f2
@@ -172,28 +157,17 @@ parse_end:
     div.s $f1, $f1, $f2
     add.s $f0, $f0, $f1
 
-skip_frac_add:
-    # rounding (same as above)
-    mul.s $f1, $f0, $f10
-    add.s $f1, $f1, $f11
-    cvt.w.s $f2, $f1
-    cvt.s.w $f2, $f2
-    div.s $f0, $f2, $f10
+check_sign_last:
+    # CHANGE: Apply negative sign for the last number
+    beqz $s5, save_last
+    neg.s $f0, $f0
 
-    # store
-    andi $t9, $t2, 3
-    bnez $t9, end_align_fix
+save_last:
     s.s $f0, 0($t2)
     addi $t2, $t2, 4
-    j done_parse
-
-end_align_fix:
-    addi $t2, $t2, 4
-    s.s $f0, -4($t2)
-    j done_parse
 
 done_parse:
-    #### 5) PRINT STORED FLOATS ####
+    #### 5. PRINT FLOAT ARRAY ####
     la $t2, floatArr
     li $t8, 0
 
@@ -210,14 +184,6 @@ print_loop:
     addi $t8, $t8, 1
     blt $t8, 10, print_loop
 
-    #### 6) EXIT ####
-    li $v0, 10
-    syscall
-
-# Immediate error handler for negative numbers
-error_exit:
-    li $v0, 4
-    la $a0, errorMsg
-    syscall
+    #### 6. EXIT ####
     li $v0, 10
     syscall
