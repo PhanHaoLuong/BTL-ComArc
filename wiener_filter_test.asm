@@ -1,8 +1,8 @@
 .data
 M:              .word 3
 iSz:            .word 9
-R:              .space 36          # Will be computed (M*M floats)
-gamma_dx:       .space 12          # Will be computed (M floats)
+R:              .float 2.0, 1.5, 0.9, 1.5, 2.0, 1.5, 0.9, 1.5, 2.0
+gamma_dx:       .float 1.8, 1.2, 0.7
 h_out:          .float 0.0, 0.0, 0.0
 eps:            .float 1e-6
 
@@ -20,124 +20,6 @@ newline:        .asciiz "\n"
 
 .text
 main:
-    # === NEW: Compute Autocorrelation Matrix R ===
-    lw $s5, iSz                    # N = signal length
-    lw $s6, M                      # M = filter order
-    la $s0, input                  # Input signal pointer
-    la $s1, R                      # R matrix pointer
-    
-    # Compute R[i][j] = autocorr(i-j)
-    li $t0, 0                      # i = row index
-compute_R_row:
-    bge $t0, $s6, compute_gamma
-    li $t1, 0                      # j = col index
-    
-compute_R_col:
-    bge $t1, $s6, next_R_row
-    
-    # Calculate lag = |i - j|
-    sub $t2, $t0, $t1
-    bgez $t2, lag_positive
-    sub $t2, $zero, $t2            # abs(i-j)
-lag_positive:
-    
-    # Compute autocorrelation for this lag
-    mtc1 $zero, $f0
-    cvt.s.w $f0, $f0               # sum = 0.0
-    move $t3, $t2                  # n starts at lag
-    
-autocorr_sum:
-    bge $t3, $s5, store_R_element
-    
-    # Load input[n]
-    sll $t4, $t3, 2
-    add $t4, $t4, $s0
-    l.s $f2, 0($t4)
-    
-    # Load input[n-lag]
-    sub $t5, $t3, $t2
-    sll $t5, $t5, 2
-    add $t5, $t5, $s0
-    l.s $f4, 0($t5)
-    
-    # sum += input[n] * input[n-lag]
-    mul.s $f6, $f2, $f4
-    add.s $f0, $f0, $f6
-    
-    addi $t3, $t3, 1
-    j autocorr_sum
-    
-store_R_element:
-    # Normalize: R[i][j] = sum / N
-    mtc1 $s5, $f8
-    cvt.s.w $f8, $f8
-    div.s $f0, $f0, $f8
-    
-    # Store in R matrix
-    mul $t6, $t0, $s6
-    add $t6, $t6, $t1
-    sll $t6, $t6, 2
-    add $t6, $t6, $s1
-    s.s $f0, 0($t6)
-    
-    addi $t1, $t1, 1
-    j compute_R_col
-    
-next_R_row:
-    addi $t0, $t0, 1
-    j compute_R_row
-
-    # === NEW: Compute Cross-correlation Vector gamma_dx ===
-compute_gamma:
-    la $s2, desired                # Desired signal pointer
-    la $s3, gamma_dx               # Cross-corr vector pointer
-    li $t0, 0                      # lag index
-    
-compute_gamma_loop:
-    bge $t0, $s6, solve_system
-    
-    # Compute cross-correlation for lag k
-    mtc1 $zero, $f0
-    cvt.s.w $f0, $f0               # sum = 0.0
-    move $t1, $t0                  # n starts at lag
-    
-crosscorr_sum:
-    bge $t1, $s5, store_gamma
-    
-    # Load desired[n]
-    sll $t2, $t1, 2
-    add $t2, $t2, $s2
-    l.s $f2, 0($t2)
-    
-    # Load input[n-lag]
-    sub $t3, $t1, $t0
-    sll $t3, $t3, 2
-    add $t3, $t3, $s0
-    l.s $f4, 0($t3)
-    
-    # sum += desired[n] * input[n-lag]
-    mul.s $f6, $f2, $f4
-    add.s $f0, $f0, $f6
-    
-    addi $t1, $t1, 1
-    j crosscorr_sum
-    
-store_gamma:
-    # Normalize: gamma[k] = sum / N
-    mtc1 $s5, $f8
-    cvt.s.w $f8, $f8
-    div.s $f0, $f0, $f8
-    
-    # Store in gamma_dx vector
-    sll $t4, $t0, 2
-    add $t4, $t4, $s3
-    s.s $f0, 0($t4)
-    
-    addi $t0, $t0, 1
-    j compute_gamma_loop
-
-    # === Solve System Using Gaussian Elimination ===
-solve_system:
     la $s0, R
     la $s1, gamma_dx
     la $s2, h_out
